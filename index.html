@@ -375,48 +375,82 @@
             renderBookList();
             return;
           }
-          const stored = localStorage.getItem('vc_dataFileId');
-          if (stored) {
-            dataFileId = stored;
-            // try reading file and also check drive modified time
-            readFileAndMaybeSync(stored);
-          } else {
-            // look for file by name
-            gapi.client.drive.files.list({
-              q: `name='${DATA_FILENAME}' and trashed=false`,
-              fields: 'files(id,name,modifiedTime)'
-            }).then(res => {
-              if (res.result.files && res.result.files.length > 0) {
-                dataFileId = res.result.files[0].id;
-                localStorage.setItem('vc_dataFileId', dataFileId);
-                // store drive modified time
-                if (res.result.files[0].modifiedTime) {
-                  localStorage.setItem('vc_driveModifiedTime', res.result.files[0].modifiedTime);
-                }
-                readFileAndMaybeSync(dataFileId);
-              } else {
-                createFile();
-              }
-            }).catch(err => {
-              console.warn('Drive list error', err);
-              renderBookList();
-            });
-          }
+          // Always search latest file on Drive
+gapi.client.drive.files.list({
+    q: `name='${DATA_FILENAME}' and trashed=false`,
+    fields: 'files(id,name,modifiedTime)'
+})
+.then(res => {
+
+    if (res.result.files && res.result.files.length > 0) {
+
+        dataFileId = res.result.files[0].id;
+
+        localStorage.setItem("vc_dataFileId", dataFileId);
+
+        if (res.result.files[0].modifiedTime) {
+            localStorage.setItem(
+                "vc_driveModifiedTime",
+                res.result.files[0].modifiedTime
+            );
+        }
+
+        readFileAndMaybeSync(dataFileId);
+
+  } else {
+
+    createFile()
+    .then(() => {
+        saveToLocalBackup();
+        renderBookList();
+    })
+        .catch(console.error);
+
+}
+
+})
+.catch(err => {
+
+    console.warn("Drive list error", err);
+
+    renderBookList();
+
+});
         }
 
         async function createFile() {
-          gapi.client.drive.files.create({
-            resource: { name: DATA_FILENAME, mimeType: 'application/json' },
-            fields: 'id,modifiedTime'
-          }).then(res => {
-            dataFileId = res.result.id;
-            localStorage.setItem('vc_dataFileId', dataFileId);
-            if (res.result.modifiedTime) localStorage.setItem('vc_driveModifiedTime', res.result.modifiedTime);
-            // upload initial empty content
-            await uploadFile(JSON.stringify(allData || {}));uploadFile(JSON.stringify(allData || {}));
-          }).catch(err => {
+        return gapi.client.drive.files.create({
+    resource: {
+        name: DATA_FILENAME,
+        mimeType: 'application/json'
+    },
+    fields: 'id,modifiedTime'
+})
+.then(async (res) => {
+
+    dataFileId = res.result.id;
+
+    localStorage.setItem("vc_dataFileId", dataFileId);
+
+    if (res.result.modifiedTime) {
+        localStorage.setItem(
+            "vc_driveModifiedTime",
+            res.result.modifiedTime
+        );
+    }
+
+    await uploadFile(JSON.stringify(allData || {}));
+
+saveToLocalBackup();
+
+return dataFileId;
+
+})
+.catch(err => {
     console.error("Drive create error", err);
+
     throw err;
+
 });
         }
 
@@ -430,18 +464,38 @@
               const localDriveModified = localStorage.getItem('vc_driveModifiedTime');
               // if drive has a newer version than local, download; else keep local and upload
               if (!localDriveModified || new Date(driveModified) > new Date(localDriveModified)) {
-                // download drive file (media)
-                readFile(fileId);
-              } else {
-                // local newer → upload local to drive to keep single source
-                saveDataFile();
-                renderBookList();
-              }
-            }).catch(err => {
-              console.warn('Drive metadata read error', err);
-              // fallback to reading file
-              readFile(fileId);
-            });
+
+    readFile(fileId);
+
+} else {
+
+    saveDataFile().catch(console.error);
+
+    renderBookList();
+
+}
+            }).catch(async err => {
+
+    console.warn('Drive metadata read error', err);
+
+    // Agar file delete ho gayi hai to nayi file banao
+    if (err.status === 404 || (err.result && err.result.error && err.result.error.code === 404)) {
+
+        localStorage.removeItem("vc_dataFileId");
+        localStorage.removeItem("vc_driveModifiedTime");
+
+        dataFileId = null;
+
+        await createFile();
+
+        renderBookList();
+
+        return;
+    }
+
+    readFile(fileId);
+
+});
         }
 
         function readFile(fileId) {
@@ -487,17 +541,25 @@
               console.warn('Drive upload non-ok', res.status, errorText);
               throw new Error(`Drive upload failed: ${res.status} ${errorText}`);
             }
-          } catch (err) {
-            console.warn('Drive upload error', err);
-            throw err;
-          }
+          } catch(err){
+
+console.error(err);
+
+throw err;
+
+}
         }
 
         // save data file (local + upload)
         async function saveDataFile() {
-          saveToLocalBackup();
-          await uploadFile(JSON.stringify(allData || {}));
-        }
+
+    if (!dataFileId) return;
+
+    saveToLocalBackup();
+
+    await uploadFile(JSON.stringify(allData || {}));
+
+}
 
         async function downloadDriveJson(fileId) {
           console.log('[sync] Download start', { fileId });
@@ -525,12 +587,14 @@
         dataFileId = null;
 
         // Nayi file create karo
-        await createFile();
+       const newFileId = await createFile();
 
-        // Local data upload karo
-        await uploadFile(JSON.stringify(allData || {}));
+if (!newFileId) {
+    throw new Error("Unable to create Drive file.");
+}
 
-        return {};
+return {};
+      
     }
 
     throw new Error(`Drive download failed: ${res.status} ${errorText}`);
@@ -544,11 +608,27 @@
           console.log('[sync] Login state', { signedIn: Boolean(accessToken), hasTokenClient: Boolean(tokenClient) });
           console.log('[sync] Access token', accessToken ? { present: true, length: accessToken.length } : { present: false });
           console.log('[sync] Drive File ID', dataFileId || null);
-          if (!accessToken || !dataFileId) {
-            saveToLocalBackup();
-            renderBookList();
-            return alert('Local backup saved. Sign in with Google Drive to sync online.');
-          }
+         if (!accessToken) {
+
+    saveToLocalBackup();
+
+    renderBookList();
+
+    return alert("Please Sign in with Google first.");
+
+}
+
+if (!dataFileId) {
+
+    const newFileId = await createFile();
+
+    if (!newFileId) {
+        throw new Error("Drive file creation failed.");
+    }
+
+    dataFileId = newFileId;
+
+}
           try {
             const remote = await downloadDriveJson(dataFileId);
             console.log('[sync] Merge start');
@@ -624,9 +704,15 @@
         });
 
         // optional periodic sync (conservative interval)
-        setInterval(() => {
-          if (accessToken && dataFileId) autoSyncFromDrive();
-        }, 60 * 1000); // every 60s
+        setInterval(async () => {
+
+    if (document.hidden) return;
+
+    if (accessToken && dataFileId) {
+        await autoSyncFromDrive();
+    }
+
+}, 60000); // every 60s
 
         // === UI & entries logic ===
         function showScreen(s) { homeScreen.style.display = s==='home'?'block':'none'; detailsScreen.style.display = s==='details'?'block':'none'; }
