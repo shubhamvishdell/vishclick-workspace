@@ -532,9 +532,25 @@
             if (currentBookName) renderEntries();
             alert('Sync complete.');
           } catch (err) {
-            console.warn('[sync] Sync now failed exact error', err);
-            alert('Sync failed. Your local backup is still saved.');
-          }
+
+    console.error("========== SYNC ERROR ==========");
+    console.error(err);
+
+    if (err.stack) {
+        console.error(err.stack);
+    }
+
+    if (err.message) {
+        console.error("Message :", err.message);
+    }
+
+    alert(
+        "Sync Failed!\n\n" +
+        (err.message || "Unknown Error") +
+        "\n\nF12 → Console me exact error dekh sakte ho."
+    );
+
+}
         }
 
         // auto-download latest from Drive (used on focus)
