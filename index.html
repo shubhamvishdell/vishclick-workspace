@@ -448,9 +448,9 @@ gapi.client.drive.files.list({
         );
     }
 
-    await uploadFile(JSON.stringify(allData || {}));
+    saveToLocalBackup();
 
-saveToLocalBackup();
+await uploadFile(JSON.stringify(allData || {}));
 
 return dataFileId;
 
@@ -535,6 +535,7 @@ return dataFileId;
         async function uploadFile(content) {
           if (!accessToken || !dataFileId) return;
           try {
+            console.log("UPLOAD content =", content);
             const blob = new Blob([content], { type: 'application/json' });
             const res = await fetch(`https://www.googleapis.com/upload/drive/v3/files/${dataFileId}?uploadType=media&fields=id,modifiedTime`, {
               method: 'PATCH',
@@ -566,6 +567,9 @@ throw err;
 
     saveToLocalBackup();
 
+    console.log("saveDataFile allData =", allData);
+    console.log("saveDataFile JSON =", JSON.stringify(allData));
+
     await uploadFile(JSON.stringify(allData || {}));
 
 }
@@ -590,17 +594,19 @@ throw err;
         console.warn("Old Drive file not found. Creating new file...");
 
         // Purani File ID delete
-        localStorage.removeItem("vc_dataFileId");
-        localStorage.removeItem("vc_driveModifiedTime");
+localStorage.removeItem("vc_dataFileId");
+localStorage.removeItem("vc_driveModifiedTime");
 
-        dataFileId = null;
+dataFileId = null;
 
-        // Nayi file create karo
-       const newFileId = await createFile();
+// Nayi file create karo
+const newFileId = await createFile();
 
 if (!newFileId) {
     throw new Error("Unable to create Drive file.");
 }
+
+await saveDataFile();
 
 return {};
       
@@ -642,6 +648,8 @@ if (!dataFileId) {
             const remote = await downloadDriveJson(dataFileId);
             console.log('[sync] Merge start');
             allData = mergeData(allData, remote || {});
+            console.log("SYNC allData =", allData);
+            console.log("SYNC JSON =", JSON.stringify(allData));
             console.log('[sync] Merge success', { books: getBookNames(allData).length });
             saveToLocalBackup();
             await uploadFile(JSON.stringify(allData || {}));
