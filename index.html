@@ -404,7 +404,7 @@
           }
         }
 
-        function createFile() {
+        async function createFile() {
           gapi.client.drive.files.create({
             resource: { name: DATA_FILENAME, mimeType: 'application/json' },
             fields: 'id,modifiedTime'
@@ -413,8 +413,11 @@
             localStorage.setItem('vc_dataFileId', dataFileId);
             if (res.result.modifiedTime) localStorage.setItem('vc_driveModifiedTime', res.result.modifiedTime);
             // upload initial empty content
-            uploadFile(JSON.stringify(allData || {}));
-          }).catch(err => console.warn('Drive create error', err));
+            await uploadFile(JSON.stringify(allData || {}));uploadFile(JSON.stringify(allData || {}));
+          }).catch(err => {
+    console.error("Drive create error", err);
+    throw err;
+});
         }
 
         // read file metadata then decide whether to download or keep local
@@ -502,10 +505,36 @@
             headers: { 'Authorization': `Bearer ${accessToken}` }
           });
           if (!res.ok) {
-            const errorText = await res.text();
-            console.warn('[sync] Download failure', { status: res.status, errorText });
-            throw new Error(`Drive download failed: ${res.status} ${errorText}`);
-          }
+
+    const errorText = await res.text();
+
+    console.warn('[sync] Download failure', {
+        status: res.status,
+        errorText
+    });
+
+    // Agar Drive file delete ho gayi hai
+    if (res.status === 404) {
+
+        console.warn("Old Drive file not found. Creating new file...");
+
+        // Purani File ID delete
+        localStorage.removeItem("vc_dataFileId");
+        localStorage.removeItem("vc_driveModifiedTime");
+
+        dataFileId = null;
+
+        // Nayi file create karo
+        await createFile();
+
+        // Local data upload karo
+        await uploadFile(JSON.stringify(allData || {}));
+
+        return {};
+    }
+
+    throw new Error(`Drive download failed: ${res.status} ${errorText}`);
+}
           const text = await res.text();
           console.log('[sync] Download success', { fileId, bytes: text.length });
           return text ? JSON.parse(text) : {};
