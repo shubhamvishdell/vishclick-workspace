@@ -55,12 +55,21 @@
                 <input type="text" id="newBookName" placeholder="New cashbook name" required>
                 <button type="submit">Add New Book</button>
             </form>
+            <div class="inline-btns">
+                <button type="button" id="syncNowButton">Sync Now</button>
+                <button type="button" id="localBackupButton">Local Backup</button>
+                <button type="button" id="restoreBackupButton">Restore Backup</button>
+                <input type="file" id="restoreBackupInput" accept="application/json" style="display:none;">
+            </div>
             <div id="bookList"></div>
         </div>
 
         <div id="detailsScreen" style="display: none;">
             <button id="backButton">&larr; Back to Home</button>
-            <h2 id="bookTitle" style="background-color: #e6e6fa; padding: 8px;"></h2>
+            <div class="inline-btns">
+                <h2 id="bookTitle" style="background-color: #e6e6fa; padding: 8px; flex:1;"></h2>
+                <button type="button" id="renameBookButton">Rename Book</button>
+            </div>
             <h3>Add New Entry</h3>
             <form id="entryForm" onsubmit="return false;">
                 <input type="date" id="dateInput"> <input type="time" id="timeInput">
@@ -82,6 +91,7 @@
             </div>
             <button type="button" id="exportPdfButton">Export Report as PDF</button>
             <h3>Entries</h3>
+            <input type="search" id="searchInput" placeholder="Search entries">
             <table>
                 <thead>
                     <tr><th>Date</th><th>Remark</th><th>Mode</th><th>Cash In</th><th>Cash Out</th><th>Balance</th><th>Actions</th></tr>
@@ -124,6 +134,13 @@
         let dataFileId = null;
         let currentBookName = null;
         let editingEntryId = null;
+        let deletedEntryIds = new Set(JSON.parse(localStorage.getItem('vc_deletedEntryIds') || '[]'));
+        let deletedBookNames = new Set(JSON.parse(localStorage.getItem('vc_deletedBookNames') || '[]'));
+
+        function saveDeletionMarkers() {
+          localStorage.setItem('vc_deletedEntryIds', JSON.stringify([...deletedEntryIds]));
+          localStorage.setItem('vc_deletedBookNames', JSON.stringify([...deletedBookNames]));
+        }
 
         // store last known drive modified time to help conflicts
         // localStorage key: vc_driveModifiedTime
@@ -152,6 +169,12 @@
         const netBalanceDisplay = document.getElementById('netBalanceDisplay');
         const entryList = document.getElementById('entryList');
         const exportPdfButton = document.getElementById('exportPdfButton');
+        const syncNowButton = document.getElementById('syncNowButton');
+        const localBackupButton = document.getElementById('localBackupButton');
+        const restoreBackupButton = document.getElementById('restoreBackupButton');
+        const restoreBackupInput = document.getElementById('restoreBackupInput');
+        const renameBookButton = document.getElementById('renameBookButton');
+        const searchInput = document.getElementById('searchInput');
 
         const editModal = document.getElementById('editModal');
         const editDate = document.getElementById('editDate');
@@ -169,11 +192,52 @@
                 if (dataFileId) localStorage.setItem('vc_dataFileId', dataFileId);
             } catch (e) { console.warn('Local backup fail', e); }
         }
+
+
+        function normalizeData(data) {
+          if (!data || typeof data !== 'object' || Array.isArray(data)) return {};
+          const out = {};
+          Object.keys(data).forEach(book => {
+            if (deletedBookNames.has(book)) return;
+            if (!Array.isArray(data[book])) return;
+            out[book] = data[book].filter(e => e && typeof e === 'object' && !deletedEntryIds.has(String(e.id))).map(e => ({
+              id: e.id || Date.now()+Math.random(),
+              date: e.date || new Date().toISOString().slice(0,16).replace('T',' '),
+              remark: String(e.remark || ''),
+              mode: e.mode || 'Cash',
+              amount: Number(e.amount) || 0,
+              type: e.type === 'out' ? 'out' : 'in',
+              updatedAt: e.updatedAt || new Date().toISOString()
+            }));
+          });
+          return out;
+        }
+
+        function mergeData(local, remote) {
+          const merged = normalizeData(local);
+          const safeRemote = normalizeData(remote);
+          Object.keys(safeRemote).forEach(book => {
+            if (!merged[book]) merged[book] = [];
+            const byId = new Map(merged[book].map(e => [String(e.id), e]));
+            safeRemote[book].forEach(remoteEntry => {
+              const key = String(remoteEntry.id);
+              const localEntry = byId.get(key);
+              if (!localEntry) {
+                merged[book].push(remoteEntry);
+                return;
+              }
+              const localUpdated = new Date(localEntry.updatedAt || 0);
+              const remoteUpdated = new Date(remoteEntry.updatedAt || 0);
+              if (remoteUpdated > localUpdated) Object.assign(localEntry, remoteEntry);
+            });
+          });
+          return merged;
+        }
         function loadFromLocalBackup() {
             try {
                 const t = localStorage.getItem('vc_allData');
                 const id = localStorage.getItem('vc_dataFileId');
-                if (t) allData = JSON.parse(t);
+                if (t) allData = normalizeData(JSON.parse(t));
                 if (id) dataFileId = id;
             } catch (e) { console.warn('Local load fail', e); }
         }
@@ -325,7 +389,7 @@
               const remote = res.result || {};
               // If remote is an object with the same structure, adopt it
               if (remote && typeof remote === 'object') {
-                allData = remote;
+                allData = mergeData(allData, remote);
                 saveToLocalBackup();
                 // update local drive modified time by fetching metadata
                 gapi.client.drive.files.get({ fileId, fields: 'modifiedTime' }).then(m => {
@@ -347,7 +411,7 @@
           if (!accessToken || !dataFileId) return;
           try {
             const blob = new Blob([content], { type: 'application/json' });
-            const res = await fetch(`https://www.googleapis.com/upload/drive/v3/files/${dataFileId}?uploadType=media`, {
+            const res = await fetch(`https://www.googleapis.com/upload/drive/v3/files/${dataFileId}?uploadType=media&fields=id,modifiedTime`, {
               method: 'PATCH',
               headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
               body: blob
@@ -369,6 +433,26 @@
           await uploadFile(JSON.stringify(allData || {}));
         }
 
+        async function syncNow() {
+          if (!accessToken || !dataFileId) {
+            saveToLocalBackup();
+            renderBookList();
+            return alert('Local backup saved. Sign in with Google Drive to sync online.');
+          }
+          try {
+            const res = await gapi.client.drive.files.get({ fileId: dataFileId, alt: 'media' });
+            allData = mergeData(allData, res.result || {});
+            saveToLocalBackup();
+            await uploadFile(JSON.stringify(allData || {}));
+            renderBookList();
+            if (currentBookName) renderEntries();
+            alert('Sync complete.');
+          } catch (err) {
+            console.warn('Sync now failed', err);
+            alert('Sync failed. Your local backup is still saved.');
+          }
+        }
+
         // auto-download latest from Drive (used on focus)
         async function autoSyncFromDrive() {
           if (!accessToken || !dataFileId) return;
@@ -378,8 +462,12 @@
             const driveModified = meta.result.modifiedTime;
             const localDriveModified = localStorage.getItem('vc_driveModifiedTime');
             if (!localDriveModified || new Date(driveModified) > new Date(localDriveModified)) {
-              await readFile(dataFileId);
-              console.log('Auto-downloaded latest data from Drive.');
+              const res = await gapi.client.drive.files.get({ fileId: dataFileId, alt: 'media' });
+              allData = mergeData(allData, res.result || {});
+              saveToLocalBackup();
+              renderBookList();
+              if (currentBookName) renderEntries();
+              console.log('Auto-downloaded and merged latest data from Drive.');
             } else {
               // local is newer — push local
               await saveDataFile();
@@ -467,6 +555,8 @@
               const confirmDel = prompt(`Type the book name "${name}" to confirm deletion:`);
               if (confirmDel === name) {
                 delete allData[name];
+                deletedBookNames.add(name);
+                saveDeletionMarkers();
                 saveToLocalBackup();
                 autoSyncToDriveAfterChange();
                 renderBookList();
@@ -505,7 +595,7 @@
           if (!remarkInput.value.trim()) return alert('Enter remark.');
           const d = dateInput.value || new Date().toISOString().slice(0,10);
           const t = timeInput.value || new Date().toTimeString().slice(0,5);
-          const entry = { id: Date.now()+Math.random(), date:`${d} ${t}`, remark: remarkInput.value.trim(), mode: modeInput.value, amount: a, type };
+          const entry = { id: Date.now()+Math.random(), date:`${d} ${t}`, remark: remarkInput.value.trim(), mode: modeInput.value, amount: a, type, updatedAt: new Date().toISOString() };
           allData[currentBookName].push(entry);
           renderEntries();
           saveToLocalBackup();
@@ -516,11 +606,61 @@
 
         cashInButton.onclick = () => addEntry('in');
         cashOutButton.onclick = () => addEntry('out');
+        searchInput.oninput = renderEntries;
+
+        renameBookButton.onclick = () => {
+          if (!currentBookName) return;
+          const nextName = prompt('Enter new book name:', currentBookName);
+          const cleanName = (nextName || '').trim();
+          if (!cleanName || cleanName === currentBookName) return;
+          if (allData[cleanName]) return alert('A book with that name already exists.');
+          allData[cleanName] = allData[currentBookName];
+          deletedBookNames.add(currentBookName);
+          saveDeletionMarkers();
+          delete allData[currentBookName];
+          currentBookName = cleanName;
+          bookTitle.textContent = cleanName;
+          saveToLocalBackup();
+          autoSyncToDriveAfterChange();
+          renderEntries();
+        };
+
+        syncNowButton.onclick = syncNow;
+        localBackupButton.onclick = () => {
+          saveToLocalBackup();
+          const blob = new Blob([JSON.stringify(allData || {}, null, 2)], { type: 'application/json' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `vishclick-backup-${new Date().toISOString().slice(0,10)}.json`;
+          a.click();
+          URL.revokeObjectURL(url);
+        };
+        restoreBackupButton.onclick = () => restoreBackupInput.click();
+        restoreBackupInput.onchange = async () => {
+          const file = restoreBackupInput.files && restoreBackupInput.files[0];
+          if (!file) return;
+          try {
+            const restored = JSON.parse(await file.text());
+            allData = mergeData(allData, restored);
+            saveToLocalBackup();
+            await autoSyncToDriveAfterChange();
+            renderBookList();
+            if (currentBookName) renderEntries();
+            alert('Backup restored and merged.');
+          } catch (err) {
+            console.warn('Restore failed', err);
+            alert('Restore failed. Select a valid VishClick JSON backup.');
+          } finally {
+            restoreBackupInput.value = '';
+          }
+        };
 
         // === FIXED renderEntries with correct running balances ===
         function renderEntries() {
           if (!currentBookName) return;
           const arr = allData[currentBookName] || [];
+          const query = (searchInput.value || '').trim().toLowerCase();
 
           // Sort oldest → newest for balance calculation
           const sortedAsc = arr.slice().sort((a, b) => new Date(a.date) - new Date(b.date));
@@ -535,7 +675,7 @@
           }
 
           // Now display latest → oldest
-          const sortedDesc = sortedAsc.slice().reverse();
+          const sortedDesc = sortedAsc.slice().reverse().filter(e => !query || [e.date, e.remark, e.mode, e.type, String(e.amount)].some(v => String(v || '').toLowerCase().includes(query)));
           entryList.innerHTML = '';
 
           for (let e of sortedDesc) {
@@ -575,6 +715,8 @@
               if (confirm('Delete this entry?')) {
                 const idx = allData[currentBookName].findIndex(x=>x.id===e.id);
                 if (idx > -1) {
+                  deletedEntryIds.add(String(e.id));
+                  saveDeletionMarkers();
                   allData[currentBookName].splice(idx,1);
                   renderEntries();
                   saveToLocalBackup();
@@ -615,6 +757,7 @@
           e.mode = editMode.value;
           e.amount = a;
           e.remark = editRemark.value.trim();
+          e.updatedAt = new Date().toISOString();
           editingEntryId = null;
           editModal.style.display = 'none';
           renderEntries();
