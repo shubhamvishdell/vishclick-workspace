@@ -194,11 +194,50 @@
         }
 
 
+        const BOOK_META_KEY = '__bookMeta';
+
+        function nowIso() { return new Date().toISOString(); }
+
+        function getBookMetaStore(data = allData) {
+          if (!data[BOOK_META_KEY] || typeof data[BOOK_META_KEY] !== 'object' || Array.isArray(data[BOOK_META_KEY])) {
+            data[BOOK_META_KEY] = { books: {} };
+          }
+          if (!data[BOOK_META_KEY].books || typeof data[BOOK_META_KEY].books !== 'object') {
+            data[BOOK_META_KEY].books = {};
+          }
+          return data[BOOK_META_KEY].books;
+        }
+
+        function getBookNames(data = allData) {
+          return Object.keys(data || {}).filter(name => name !== BOOK_META_KEY && Array.isArray(data[name]));
+        }
+
+        function inferBookModifiedAt(entries) {
+          const times = (entries || []).map(e => new Date(e.updatedAt || e.date || 0).getTime()).filter(Number.isFinite);
+          return times.length ? new Date(Math.max(...times)).toISOString() : nowIso();
+        }
+
+        function ensureBookModifiedAt(book, data = allData) {
+          if (!Array.isArray(data[book])) return null;
+          const meta = getBookMetaStore(data);
+          if (!meta[book] || typeof meta[book] !== 'object') meta[book] = {};
+          if (!meta[book].modifiedAt) meta[book].modifiedAt = inferBookModifiedAt(data[book]);
+          return meta[book].modifiedAt;
+        }
+
+        function touchBook(book, data = allData, timestamp = nowIso()) {
+          if (!Array.isArray(data[book])) return timestamp;
+          const meta = getBookMetaStore(data);
+          if (!meta[book] || typeof meta[book] !== 'object') meta[book] = {};
+          meta[book].modifiedAt = timestamp;
+          return timestamp;
+        }
+
         function normalizeData(data) {
           if (!data || typeof data !== 'object' || Array.isArray(data)) return {};
           const out = {};
           Object.keys(data).forEach(book => {
-            if (deletedBookNames.has(book)) return;
+            if (book === BOOK_META_KEY || deletedBookNames.has(book)) return;
             if (!Array.isArray(data[book])) return;
             out[book] = data[book].filter(e => e && typeof e === 'object' && !deletedEntryIds.has(String(e.id))).map(e => ({
               id: e.id || Date.now()+Math.random(),
@@ -210,26 +249,45 @@
               updatedAt: e.updatedAt || new Date().toISOString()
             }));
           });
+
+          const sourceMeta = data[BOOK_META_KEY] && typeof data[BOOK_META_KEY] === 'object' ? data[BOOK_META_KEY].books || {} : {};
+          const outMeta = getBookMetaStore(out);
+          getBookNames(out).forEach(book => {
+            const sourceModifiedAt = sourceMeta[book] && sourceMeta[book].modifiedAt;
+            outMeta[book] = { modifiedAt: sourceModifiedAt || inferBookModifiedAt(out[book]) };
+          });
           return out;
         }
 
         function mergeData(local, remote) {
-          const merged = normalizeData(local);
-          const safeRemote = normalizeData(remote);
-          Object.keys(safeRemote).forEach(book => {
-            if (!merged[book]) merged[book] = [];
-            const byId = new Map(merged[book].map(e => [String(e.id), e]));
-            safeRemote[book].forEach(remoteEntry => {
-              const key = String(remoteEntry.id);
-              const localEntry = byId.get(key);
-              if (!localEntry) {
-                merged[book].push(remoteEntry);
-                return;
-              }
-              const localUpdated = new Date(localEntry.updatedAt || 0);
-              const remoteUpdated = new Date(remoteEntry.updatedAt || 0);
-              if (remoteUpdated > localUpdated) Object.assign(localEntry, remoteEntry);
-            });
+          const normalizedLocal = normalizeData(local);
+          const normalizedRemote = normalizeData(remote);
+          const merged = normalizeData(normalizedLocal);
+          const localMeta = getBookMetaStore(normalizedLocal);
+          const remoteMeta = getBookMetaStore(normalizedRemote);
+          const mergedMeta = getBookMetaStore(merged);
+
+          new Set([...getBookNames(normalizedLocal), ...getBookNames(normalizedRemote)]).forEach(book => {
+            if (deletedBookNames.has(book)) return;
+            const localHasBook = Array.isArray(normalizedLocal[book]);
+            const remoteHasBook = Array.isArray(normalizedRemote[book]);
+            const localModified = new Date((localMeta[book] && localMeta[book].modifiedAt) || inferBookModifiedAt(normalizedLocal[book] || [])).getTime();
+            const remoteModified = new Date((remoteMeta[book] && remoteMeta[book].modifiedAt) || inferBookModifiedAt(normalizedRemote[book] || [])).getTime();
+
+            if (!localHasBook && remoteHasBook) {
+              merged[book] = normalizedRemote[book].slice();
+              mergedMeta[book] = { modifiedAt: new Date(remoteModified).toISOString() };
+              return;
+            }
+            if (!remoteHasBook) {
+              merged[book] = normalizedLocal[book].slice();
+              mergedMeta[book] = { modifiedAt: new Date(localModified).toISOString() };
+              return;
+            }
+
+            const winner = remoteModified > localModified ? normalizedRemote : normalizedLocal;
+            merged[book] = winner[book].slice();
+            mergedMeta[book] = { modifiedAt: new Date(Math.max(localModified, remoteModified)).toISOString() };
           });
           return merged;
         }
@@ -238,6 +296,7 @@
                 const t = localStorage.getItem('vc_allData');
                 const id = localStorage.getItem('vc_dataFileId');
                 if (t) allData = normalizeData(JSON.parse(t));
+                getBookNames(allData).forEach(name => ensureBookModifiedAt(name));
                 if (id) dataFileId = id;
             } catch (e) { console.warn('Local load fail', e); }
         }
@@ -255,7 +314,7 @@
           google.accounts.id.prompt();
 
           // show local data if present while Google auth completes
-          if (Object.keys(allData).length > 0) {
+          if (getBookNames(allData).length > 0) {
             userInfo.style.display = 'block';
             userInfo.textContent = 'Signed in (local data)';
             gIdSignin.style.display = 'none';
@@ -417,13 +476,17 @@
               body: blob
             });
             if (res.ok) {
+              console.log('[sync] Upload success', { fileId: dataFileId });
               const json = await res.json().catch(()=>null);
               if (json && json.modifiedTime) localStorage.setItem('vc_driveModifiedTime', json.modifiedTime);
             } else {
-              console.warn('Drive upload non-ok', res.status, await res.text());
+              const errorText = await res.text();
+              console.warn('Drive upload non-ok', res.status, errorText);
+              throw new Error(`Drive upload failed: ${res.status} ${errorText}`);
             }
           } catch (err) {
             console.warn('Drive upload error', err);
+            throw err;
           }
         }
 
@@ -433,22 +496,43 @@
           await uploadFile(JSON.stringify(allData || {}));
         }
 
+        async function downloadDriveJson(fileId) {
+          console.log('[sync] Download start', { fileId });
+          const res = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
+            headers: { 'Authorization': `Bearer ${accessToken}` }
+          });
+          if (!res.ok) {
+            const errorText = await res.text();
+            console.warn('[sync] Download failure', { status: res.status, errorText });
+            throw new Error(`Drive download failed: ${res.status} ${errorText}`);
+          }
+          const text = await res.text();
+          console.log('[sync] Download success', { fileId, bytes: text.length });
+          return text ? JSON.parse(text) : {};
+        }
+
         async function syncNow() {
+          console.log('[sync] Login state', { signedIn: Boolean(accessToken), hasTokenClient: Boolean(tokenClient) });
+          console.log('[sync] Access token', accessToken ? { present: true, length: accessToken.length } : { present: false });
+          console.log('[sync] Drive File ID', dataFileId || null);
           if (!accessToken || !dataFileId) {
             saveToLocalBackup();
             renderBookList();
             return alert('Local backup saved. Sign in with Google Drive to sync online.');
           }
           try {
-            const res = await gapi.client.drive.files.get({ fileId: dataFileId, alt: 'media' });
-            allData = mergeData(allData, res.result || {});
+            const remote = await downloadDriveJson(dataFileId);
+            console.log('[sync] Merge start');
+            allData = mergeData(allData, remote || {});
+            console.log('[sync] Merge success', { books: getBookNames(allData).length });
             saveToLocalBackup();
             await uploadFile(JSON.stringify(allData || {}));
+            saveToLocalBackup();
             renderBookList();
             if (currentBookName) renderEntries();
             alert('Sync complete.');
           } catch (err) {
-            console.warn('Sync now failed', err);
+            console.warn('[sync] Sync now failed exact error', err);
             alert('Sync failed. Your local backup is still saved.');
           }
         }
@@ -529,7 +613,8 @@
 
         function renderBookList() {
           bookList.innerHTML = '';
-          Object.keys(allData).forEach(name => {
+          getBookNames(allData).forEach(name => ensureBookModifiedAt(name));
+          getBookNames(allData).sort((a, b) => new Date(ensureBookModifiedAt(b)) - new Date(ensureBookModifiedAt(a))).forEach(name => {
             const div = document.createElement('div');
             div.className = 'book-item';
             const span = document.createElement('div');
@@ -569,7 +654,7 @@
             div.append(span, delBtn);
             bookList.append(div);
           });
-          if (Object.keys(allData).length === 0) {
+          if (getBookNames(allData).length === 0) {
             bookList.innerHTML = '<div style="margin-top:12px;color:#666;">No cashbooks yet. Create one above to start tracking.</div>';
           }
         }
@@ -579,6 +664,7 @@
           const n = newBookNameInput.value.trim();
           if (n && !allData[n]) {
             allData[n] = [];
+            touchBook(n);
             newBookNameInput.value = '';
             renderBookList();
             saveToLocalBackup();
@@ -597,6 +683,7 @@
           const t = timeInput.value || new Date().toTimeString().slice(0,5);
           const entry = { id: Date.now()+Math.random(), date:`${d} ${t}`, remark: remarkInput.value.trim(), mode: modeInput.value, amount: a, type, updatedAt: new Date().toISOString() };
           allData[currentBookName].push(entry);
+          touchBook(currentBookName);
           renderEntries();
           saveToLocalBackup();
           autoSyncToDriveAfterChange();
@@ -615,6 +702,8 @@
           if (!cleanName || cleanName === currentBookName) return;
           if (allData[cleanName]) return alert('A book with that name already exists.');
           allData[cleanName] = allData[currentBookName];
+          const renameTime = nowIso();
+          touchBook(cleanName, allData, renameTime);
           deletedBookNames.add(currentBookName);
           saveDeletionMarkers();
           delete allData[currentBookName];
@@ -643,6 +732,7 @@
           try {
             const restored = JSON.parse(await file.text());
             allData = mergeData(allData, restored);
+            getBookNames(restored).forEach(name => { if (allData[name]) touchBook(name); });
             saveToLocalBackup();
             await autoSyncToDriveAfterChange();
             renderBookList();
@@ -718,6 +808,7 @@
                   deletedEntryIds.add(String(e.id));
                   saveDeletionMarkers();
                   allData[currentBookName].splice(idx,1);
+                  touchBook(currentBookName);
                   renderEntries();
                   saveToLocalBackup();
                   autoSyncToDriveAfterChange();
@@ -758,6 +849,7 @@
           e.amount = a;
           e.remark = editRemark.value.trim();
           e.updatedAt = new Date().toISOString();
+          touchBook(currentBookName, allData, e.updatedAt);
           editingEntryId = null;
           editModal.style.display = 'none';
           renderEntries();
