@@ -345,7 +345,11 @@
         }
 
         function initGapi() {
-          gapi.client.init({}).then(() => {
+         gapi.client.init({
+    discoveryDocs: [
+        "https://www.googleapis.com/discovery/v1/apis/drive/v3/rest"
+    ]
+}).then(() => {
             gapi.client.setToken({ access_token: accessToken });
             userInfo.style.display = 'block';
             userInfo.textContent = 'Signed in';
@@ -382,8 +386,13 @@ gapi.client.drive.files.list({
 })
 .then(res => {
 
-    if (res.result.files && res.result.files.length > 0) {
+    console.log("Drive List Response:", res);
 
+    if (
+        res.result &&
+        Array.isArray(res.result.files) &&
+        res.result.files.length > 0
+    ) {
         dataFileId = res.result.files[0].id;
 
         localStorage.setItem("vc_dataFileId", dataFileId);
