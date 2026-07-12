@@ -259,6 +259,7 @@
           return out;
         }
 
+        // === FIXED MERGE LOGIC: Entry-level merge instead of book-level replacement ===
         function mergeData(local, remote) {
           const normalizedLocal = normalizeData(local);
           const normalizedRemote = normalizeData(remote);
@@ -271,12 +272,10 @@
             if (deletedBookNames.has(book)) return;
             const localHasBook = Array.isArray(normalizedLocal[book]);
             const remoteHasBook = Array.isArray(normalizedRemote[book]);
-            const localModified = new Date((localMeta[book] && localMeta[book].modifiedAt) || inferBookModifiedAt(normalizedLocal[book] || [])).getTime();
-            const remoteModified = new Date((remoteMeta[book] && remoteMeta[book].modifiedAt) || inferBookModifiedAt(normalizedRemote[book] || [])).getTime();
 
             if (!localHasBook && remoteHasBook) {
               merged[book] = normalizedRemote[book].slice();
-              mergedMeta[book] = { modifiedAt: new Date(remoteModified).toISOString() };
+              mergedMeta[book] = { modifiedAt: remoteModified };
               return;
             }
             if (!remoteHasBook) {
@@ -285,9 +284,37 @@
               return;
             }
 
-            const winner = remoteModified > localModified ? normalizedRemote : normalizedLocal;
-            merged[book] = winner[book].slice();
-            mergedMeta[book] = { modifiedAt: new Date(Math.max(localModified, remoteModified)).toISOString() };
+            // ✅ FIXED: Merge entries by ID instead of replacing entire book
+            const localEntries = normalizedLocal[book] || [];
+            const remoteEntries = normalizedRemote[book] || [];
+            
+            // Create map of entries by ID for deduplication
+            const entryMap = {};
+            
+            localEntries.forEach(e => {
+              entryMap[e.id] = e;
+            });
+            
+            remoteEntries.forEach(e => {
+              if (!entryMap[e.id]) {
+                // New entry from remote
+                entryMap[e.id] = e;
+              } else {
+                // Entry exists in both - keep the newer one
+                const localTime = new Date(entryMap[e.id].updatedAt || 0).getTime();
+                const remoteTime = new Date(e.updatedAt || 0).getTime();
+                if (remoteTime > localTime) {
+                  entryMap[e.id] = e;
+                }
+              }
+            });
+            
+            merged[book] = Object.values(entryMap);
+            
+            // Update metadata with latest timestamp
+            const allTimes = merged[book].map(e => new Date(e.updatedAt || 0).getTime());
+            const latestTime = allTimes.length > 0 ? Math.max(...allTimes) : 0;
+            mergedMeta[book] = { modifiedAt: new Date(latestTime).toISOString() };
           });
           return merged;
         }
@@ -1003,61 +1030,6 @@ if (!dataFileId) {
           renderEntries();
           saveToLocalBackup();
           autoSyncToDriveAfterChange();
-        };
-
-        // Export PDF logic
-        exportPdfButton.onclick = () => {
-          const arr = allData[currentBookName] || [];
-          if (!arr.length) return alert('No entries to export!');
-          const sorted = arr.slice().sort((a,b) => new Date(a.date) - new Date(b.date));
-          let run=0, ti=0, to=0;
-          const rows = sorted.map(e => {
-            if (e.type==='in') { ti += +e.amount; run += +e.amount; }
-            else { to += +e.amount; run -= +e.amount; }
-            return {
-              date: new Date(e.date).toLocaleString(),
-              remark: e.remark,
-              mode: e.mode,
-              cashIn: e.type==='in'?e.amount.toFixed(2):'-',
-              cashOut: e.type==='out'?e.amount.toFixed(2):'-',
-              balance: run.toFixed(2)
-            };
-          });
-          const body = rows.slice().reverse().map(r => [r.date,r.remark,r.mode,r.cashIn,r.cashOut,r.balance]);
-          const { jsPDF } = window.jspdf;
-          const doc = new jsPDF('p','mm','a4');
-          doc.setFont('helvetica');
-          const pageWidth = doc.internal.pageSize.getWidth();
-          const margin = 10;
-          doc.setFillColor(0,38,77); doc.rect(0,0,pageWidth,12,'F');
-          doc.setTextColor(255,255,255); doc.setFontSize(16);
-          doc.text("VishClick : Design Studio", pageWidth/2, 8, { align: 'center' });
-          doc.setFillColor(230,230,250); doc.rect(0,12,pageWidth,10,'F');
-          doc.setTextColor(0); doc.setFontSize(12); doc.setFont(undefined,'bold');
-          doc.text(`Book: ${currentBookName}`, pageWidth/2, 19, { align: 'center' });
-          const totalWidth=60, gap=5, totalsY=30, totalStartX=20;
-          doc.setFontSize(9); doc.setFont(undefined,'bold');
-          doc.setFillColor(220,255,220); doc.rect(totalStartX, totalsY, totalWidth,8,'F');
-          doc.setTextColor(0,128,0); doc.text(`Total In: ${ti.toFixed(2)}`, totalStartX+3, totalsY+6);
-          doc.setFillColor(255,220,220); doc.rect(totalStartX+totalWidth+gap, totalsY, totalWidth,8,'F');
-          doc.setTextColor(220,0,0); doc.text(`Total Out: ${to.toFixed(2)}`, totalStartX+totalWidth+gap+3, totalsY+6);
-          doc.setFillColor(220,220,255); doc.rect(totalStartX+(totalWidth+gap)*2, totalsY, totalWidth,8,'F');
-          doc.setTextColor(75,0,130); doc.text(`Net Balance: ${(ti-to).toFixed(2)}`, totalStartX+(totalWidth+gap)*2+3, totalsY+6);
-          doc.autoTable({
-            head:[['Date','Remark','Mode','Cash In','Cash Out','Balance']],
-            body: body,
-            startY: totalsY+14,
-            margin:{left: margin, right: margin},
-            styles:{fontSize:9,cellPadding:2.5},
-            headStyles:{fillColor:[41,128,185], textColor:255, halign:'center'},
-            columnStyles:{0:{cellWidth:35},1:{cellWidth:'auto'},2:{cellWidth:20, halign:'center'},
-              3:{cellWidth:22,halign:'right',textColor:[0,128,0]},
-              4:{cellWidth:22,halign:'right',textColor:[220,0,0]},
-              5:{cellWidth:22,halign:'right'}
-            },
-            theme:'grid'
-          });
-          doc.save(`${currentBookName}-report.pdf`);
         };
     </script>
 </body>
